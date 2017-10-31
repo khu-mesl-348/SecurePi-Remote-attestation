@@ -2,58 +2,67 @@
 #include <stdio.h>
 
 // OpenSSL Header
-#include <openssl/asn1.h>
-#include <openssl/crypto.h>
-#include <openssl/x509.h>
-#include <openssl/pem.h>
-#include <openssl/ssl.h>
-#include <openssl/err.h>
 #include <openssl/sha.h>
 #include <openssl/rsa.h>
-#include <openssl/evp.h>
 #include <openssl/bio.h>
-#include <assert.h>
+#include <openssl/err.h>
+#include <openssl/ssl.h>
+
+void dividestr(char* dest, char* source, int start, int end)
+{
+	int i, j = 0;
+
+	for (i = start; i < end; i++)
+		dest[j++] = source[i];
+}
 
 int attestation_server_hash(unsigned char* xor_result)
 {
-	FILE *fp; // File Pointer
-	int i; // for value
-	unsigned char digest[SHA_DIGEST_LENGTH]; // SHA256 result temp save value
-	unsigned char buf[1024]; // File read data buffer
-	SHA_CTX ctx; // SHA256 Context
+	FILE *fp;
+	int i, j;
+	unsigned char buf[256];
 
-	// u-boot.bin hash //
-	if (!(fp = fopen("u-boot.bin", "rb"))) {
-		printf("File open error\n");
+	// SHA1 Value
+	SHA_CTX ctx;
+	char sha1_result[4][SHA_DIGEST_LENGTH];
+
+	// Hash u-boot.bin
+	for (i = 0; i < 4; i++)
+		memset(sha1_result[i], 0, sizeof(sha1_result[i]));
+	memset(buf, 0, sizeof(buf));
+
+	if (!(fp = fopen("u-boot.bin", "rb")))
+	{
+		printf("u-boot.bin Open Fail\n");
 		return 1;
 	}
 
 	SHA1_Init(&ctx);
-	while ((i = fread(buf, 1, sizeof(buf), fp)) > 0) {
+	while ((i = fread(buf, 1, sizeof(buf), fp)) > 0)
 		SHA1_Update(&ctx, buf, i);
-	}
-	SHA1_Final(digest, &ctx);
+	SHA1_Final(sha1_result[0], &ctx);
+
 	fclose(fp);
 
-	// image.fit hash //
-	if (!(fp = fopen("image.fit", "rb"))) {
-		printf("File open error\n");
+	// Hash image.fit
+	memset(buf, 0, sizeof(buf));
+
+	if (!(fp = fopen("image.fit", "rb")))
+	{
+		printf("image.fit Open Fail\n");
 		return 1;
 	}
 
 	SHA1_Init(&ctx);
-	while ((i = fread(buf, 1, sizeof(buf), fp)) > 0) {
+	while ((i = fread(buf, 1, sizeof(buf), fp)) > 0)
 		SHA1_Update(&ctx, buf, i);
-	}
-	SHA1_Final(xor_result, &ctx);
+	SHA1_Final(sha1_result[1], &ctx);
+
 	fclose(fp);
 
-	for (i = 0; i<20; i++)
-		xor_result[i] = xor_result[i] ^ digest[i];
-
-	// Secure_boot_daemon hash //
+	// Hash Secure_boot_daemon
 	if (!(fp = fopen("Secure_boot_daemon", "rb"))) {
-		printf("File open error\n");
+		printf("Secure_boot_daemon Open Fail\n");
 		return 1;
 	}
 
@@ -61,38 +70,81 @@ int attestation_server_hash(unsigned char* xor_result)
 	while ((i = fread(buf, 1, sizeof(buf), fp)) > 0) {
 		SHA1_Update(&ctx, buf, i);
 	}
-	SHA1_Final(digest, &ctx);
+	SHA1_Final(sha1_result[2], &ctx);
 	fclose(fp);
 
-	for (i = 0; i<20; i++)
-		xor_result[i] = xor_result[i] ^ digest[i];
+	// Hash SecurePi Serial Number
+	memset(buf, 0, sizeof(buf));
+
+	if (!(fp = fopen("serial", "rb")))
+	{
+		printf("serial Open Fail\n");
+		return 1;
+	}
+
+	SHA1_Init(&ctx);
+	while ((i = fread(buf, 1, sizeof(buf), fp)) > 0)
+		SHA1_Update(&ctx, buf, i);
+	SHA1_Final(sha1_result[3], &ctx);
+		fclose(fp);
+
+	for (i = 0; i < 4; i++)
+		for (j = 0; j < SHA_DIGEST_LENGTH; j++)
+			xor_result[j] = xor_result[j] ^ sha1_result[i][j];
 
 	return 0;
 }
-
-int receiveData(BIO* sbio)
+int receiveData(BIO *sbio, unsigned char* sign)
 {
-	FILE* fp;
 	int len;
-	char tmpbuf[512];
+	FILE* fp;
+	char buf[2048];
+	char data[2048];
+	char fileLen[2][10];
+	char* token = NULL;
+	int i, start, end;
 
-	fp = fopen("AIK", "wb");
-	len = BIO_read(sbio, tmpbuf, 451);
-	fwrite(tmpbuf, 1, len, fp);
+	for (i = 0; i < 2; i++)
+		memset(fileLen[i], 0, 10);
+	memset(data, 0, 2048);
+
+	// Data Rececive Start
+	while ((len = BIO_read(sbio, buf, 2048)) != 0);
+
+	token = strtok(buf, "  ");
+	strcpy(fileLen[0], token);
+
+	token = strtok(NULL, "  ");
+	strcpy(fileLen[1], token);
+
+	token = strtok(NULL, "");
+	strcpy(data, token);
+
+	// Store New Bootloader
+	if (!(fp = fopen("AIK", "wb")))
+	{
+		printf("AIK Open Fail\n");
+		return 1;
+	}
+
+	memset(buf, 0, 2048);
+	start = 1;
+	end = atoi(fileLen[0]);
+	dividestr(buf, data, start, end);
+	fwrite((void*)buf, 1, atoi(fileLen[0]), fp);
 	fclose(fp);
 
-	fp = fopen("Signature", "wb");
-	len = BIO_read(sbio, tmpbuf, 256);
-	fwrite(tmpbuf, 1, len, fp);
-	fclose(fp);
+	memset(buf, 0, 2048);
+	start = end;
+	end = start + atoi(fileLen[1]);
+	dividestr(buf, data, start, end);
+	strcpy(sign, buf);
 
 	return 0;
 }
 
-int decrypt_signature(unsigned char* xor_result)
+int decrypt_signature(unsigned char* xor_result, unsigned char* sign)
 {
-	FILE *fp = NULL;
-	char sign[256];
 	char decrypt_sign[20];
 	int sign_len = 0;
 
@@ -102,15 +154,7 @@ int decrypt_signature(unsigned char* xor_result)
 	RSA *rsa = EVP_PKEY_get1_RSA(pubkey);
 	fclose(key);
 
-	if (!(fp = fopen("Signature", "rb")))
-	{
-		printf("File open error\n");
-		return 1;
-	}
-	fread(sign_b, 1, 256, fp);
-	fclose(fp);
-
-	sign_len = RSA_public_decrypt(256, sign_b, decrypt_sign, rsa, padding);
+	sign_len = RSA_public_decrypt(256, sign, decrypt_sign, rsa, padding);
 	if (sign_len < 0)
 	{
 		printf("Signature decryption failed\n");
@@ -131,61 +175,58 @@ int decrypt_signature(unsigned char* xor_result)
 
 int main()
 {
-	BIO *sbio, *bbio, *acpt, *out;
-	BIO *bio_err = 0;
+	unsigned char xor_result[20];
+	// Signature Value
+	unsigned char sign[256];
+
+	// SSL Value
 	SSL_METHOD *meth;
 	SSL_CTX *ctx;
 	SSL *ssl;
+	BIO *sbio, *out;
+	BIO *bio_err = 0;
+	int len, res;
 
-	unsigned char xor_result[20];
-
-	if (!bio_err) {
+	memset(xor_result, 0, 20);
+	// SSL Connection Start
+	if (!bio_err)
+	{
 		SSL_library_init();
 		SSL_load_error_strings();
 		bio_err = BIO_new_fp(stderr, BIO_NOCLOSE);
 	}
-	meth = SSLv23_server_method();
-	ctx = SSL_CTX_new(meth);
-	res = SSL_CTX_use_certificate_chain_file(ctx, "cert");
-	assert(res);
 
-	res = SSL_CTX_use_PrivateKey_file(ctx, "private", SSL_FILETYPE_PEM);
-	assert(res);
-
-	res = SSL_CTX_check_private_key(ctx);
-	assert(res);
-
-	sbio = BIO_new_ssl(ctx, 0);
+	ctx = SSL_CTX_new(SSLv23_client_method());
+	sbio = BIO_new_ssl_connect(ctx);
 	BIO_get_ssl(sbio, &ssl);
-	assert(ssl);
+
+	if (!ssl)
+	{
+		fprintf(stderr, "Can't locate SSL pointer\n");
+		exit(1);
+	}
+
 	SSL_set_mode(ssl, SSL_MODE_AUTO_RETRY);
-
-	bbio = BIO_new(BIO_f_buffer());
-	sbio = BIO_push(bbio, sbio);
-	acpt = BIO_new_accept("PORT");
-
-	BIO_set_accept_bios(acpt, sbio);
+	BIO_set_conn_hostname(sbio, "163.180.118.145:4000");
 	out = BIO_new_fp(stdout, BIO_NOCLOSE);
-	if (BIO_do_accept(acpt) <= 0) {
-		fprintf(stderr, "Error setting up accept BIO\n");
+
+	res = BIO_do_connect(sbio);
+	if (res <= 0)
+	{
+		fprintf(stderr, "Error connecting to server\n");
 		ERR_print_errors_fp(stderr);
-		return 0;
+		exit(1);
 	}
 
-	if (BIO_do_accept(acpt) <= 0) {
-		fprintf(stderr, "Error in connection\n");
+	res = BIO_do_handshake(sbio);
+	if (res <= 0)
+	{
+		fprintf(stderr, "Error establishing SSL connection \n");
 		ERR_print_errors_fp(stderr);
-		return 0;
+		exit(1);
 	}
-
-	sbio = BIO_pop(acpt);
-	BIO_free_all(acpt);
-
-	if (BIO_do_handshake(sbio) <= 0) {
-		fprintf(stderr, "Error in SSL handshake\n");
-		ERR_print_errors_fp(stderr);
-		return 0;
-	}
+	else
+		printf("SSL Connection Success\n");
 
 	if (attestation_server_hash(xor_result) != 0)
 	{
@@ -193,9 +234,9 @@ int main()
 		return 1;
 	}
 
-	receiveData(sbio);
+	receiveData(sbio, sign);
 
-	if (decrypt_signature(xor_result) != 0)
+	if (decrypt_signature(xor_result, sign) != 0)
 	{
 		printf("Signature decryption failed\n");
 		return 1;
