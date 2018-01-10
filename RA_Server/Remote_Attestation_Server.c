@@ -24,73 +24,22 @@ int attestation_server_hash(unsigned char* xor_result)
 
 	// SHA1 Value
 	SHA_CTX ctx;
-	char sha1_result[4][SHA_DIGEST_LENGTH];
 
-	// Hash u-boot.bin
-	for (i = 0; i < 4; i++)
-		memset(sha1_result[i], 0, sizeof(sha1_result[i]));
+	memset(xor_result, 0, sizeof(xor_result));
 	memset(buf, 0, sizeof(buf));
 
-	if (!(fp = fopen("u-boot.bin", "rb")))
+	if (!(fp = fopen("Device_Value", "rb")))
 	{
-		printf("u-boot.bin Open Fail\n");
+		printf("Device_Value Open Fail\n");
 		return 1;
 	}
 
 	SHA1_Init(&ctx);
 	while ((i = fread(buf, 1, sizeof(buf), fp)) > 0)
 		SHA1_Update(&ctx, buf, i);
-	SHA1_Final(sha1_result[0], &ctx);
+	SHA1_Final(xor_result, &ctx);
 
 	fclose(fp);
-
-	// Hash image.fit
-	memset(buf, 0, sizeof(buf));
-
-	if (!(fp = fopen("image.fit", "rb")))
-	{
-		printf("image.fit Open Fail\n");
-		return 1;
-	}
-
-	SHA1_Init(&ctx);
-	while ((i = fread(buf, 1, sizeof(buf), fp)) > 0)
-		SHA1_Update(&ctx, buf, i);
-	SHA1_Final(sha1_result[1], &ctx);
-
-	fclose(fp);
-
-	// Hash Secure_boot_daemon
-	if (!(fp = fopen("Secure_boot_daemon", "rb"))) {
-		printf("Secure_boot_daemon Open Fail\n");
-		return 1;
-	}
-
-	SHA1_Init(&ctx);
-	while ((i = fread(buf, 1, sizeof(buf), fp)) > 0) {
-		SHA1_Update(&ctx, buf, i);
-	}
-	SHA1_Final(sha1_result[2], &ctx);
-	fclose(fp);
-
-	// Hash SecurePi Serial Number
-	memset(buf, 0, sizeof(buf));
-
-	if (!(fp = fopen("serial", "rb")))
-	{
-		printf("serial Open Fail\n");
-		return 1;
-	}
-
-	SHA1_Init(&ctx);
-	while ((i = fread(buf, 1, sizeof(buf), fp)) > 0)
-		SHA1_Update(&ctx, buf, i);
-	SHA1_Final(sha1_result[3], &ctx);
-		fclose(fp);
-
-	for (i = 0; i < 4; i++)
-		for (j = 0; j < SHA_DIGEST_LENGTH; j++)
-			xor_result[j] = xor_result[j] ^ sha1_result[i][j];
 
 	return 0;
 }
@@ -120,7 +69,6 @@ int receiveData(BIO *sbio, unsigned char* sign)
 	token = strtok(NULL, "");
 	strcpy(data, token);
 
-	// Store New Bootloader
 	if (!(fp = fopen("AIK", "wb")))
 	{
 		printf("AIK Open Fail\n");
@@ -147,6 +95,7 @@ int decrypt_signature(unsigned char* xor_result, unsigned char* sign)
 {
 	char decrypt_sign[20];
 	int sign_len = 0;
+	int padding = RSA_PKCS1_PADDING;
 
 	FILE *key = fopen("AIK", "rb");
 	EVP_PKEY *pubkey = NULL;
@@ -180,12 +129,12 @@ int main()
 	unsigned char sign[256];
 
 	// SSL Value
+	BIO *bio, *abio, *out;
+	BIO *bio_err = 0;
 	SSL_METHOD *meth;
 	SSL_CTX *ctx;
 	SSL *ssl;
-	BIO *sbio, *out;
-	BIO *bio_err = 0;
-	int len, res;
+	int res, len;
 
 	memset(xor_result, 0, 20);
 	// SSL Connection Start
@@ -195,35 +144,43 @@ int main()
 		SSL_load_error_strings();
 		bio_err = BIO_new_fp(stderr, BIO_NOCLOSE);
 	}
+	
+	meth = SSLv23_server_method();
+	ctx = SSL_CTX_new(meth);
+	res = SSL_CTX_use_certificate_chain_file(ctx, "cert");
 
-	ctx = SSL_CTX_new(SSLv23_client_method());
-	sbio = BIO_new_ssl_connect(ctx);
-	BIO_get_ssl(sbio, &ssl);
+	res = SSL_CTX_use_PrivateKey_file(ctx, "private", SSL_FILETYPE_PEM);
+	
+	res = SSL_CTX_check_private_key(ctx);
 
-	if (!ssl)
-	{
-		fprintf(stderr, "Can't locate SSL pointer\n");
-		exit(1);
-	}
+	bio = BIO_new_ssl(ctx, 0);
+	BIO_get_ssl(bio, &ssl);
 
 	SSL_set_mode(ssl, SSL_MODE_AUTO_RETRY);
-	BIO_set_conn_hostname(sbio, "163.180.118.145:4000");
-	out = BIO_new_fp(stdout, BIO_NOCLOSE);
+	abio = BIO_new_accept("4000");
 
-	res = BIO_do_connect(sbio);
-	if (res <= 0)
+	BIO_set_accept_bios(abio, bio);
+	if (BIO_do_accept(abio) <= 0)
 	{
-		fprintf(stderr, "Error connecting to server\n");
+		fprintf(stderr, "Error setting up accept BIO\n");
 		ERR_print_errors_fp(stderr);
-		exit(1);
+		return 0;
 	}
 
-	res = BIO_do_handshake(sbio);
-	if (res <= 0)
+	if (BIO_do_accept(abio) <= 0)
 	{
-		fprintf(stderr, "Error establishing SSL connection \n");
+		fprintf(stderr, "Error in connection\n");
 		ERR_print_errors_fp(stderr);
-		exit(1);
+		return 0;
+	}
+
+	out = BIO_pop(abio);
+
+	if (BIO_do_handshake(out) <= 0)
+	{
+		fprintf(stderr, "Error in SSL handshake\n");
+		ERR_print_errors_fp(stderr);
+		return 0;
 	}
 	else
 		printf("SSL Connection Success\n");
@@ -234,7 +191,7 @@ int main()
 		return 1;
 	}
 
-	receiveData(sbio, sign);
+	receiveData(out, sign);
 
 	if (decrypt_signature(xor_result, sign) != 0)
 	{
