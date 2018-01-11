@@ -19,14 +19,17 @@
 #include <openssl/ssl.h>
 
 #define DBG(message, tResult) printf("(Line%d, %s) %s returned 0x%08x. %s.\n\n",__LINE__ ,__func__ , message, tResult, (char *)Trspi_Error_String(tResult));
-#define DEBUG 1
+#define DEBUG 0
+#define BLOBLEN 256
+#define TPM_WELL_KNOWN_KEY_LEN 20
 
-void TPM_ERROR_PRINT(int res, char* msg)
+int TPM_ERROR_PRINT(int res, char* msg)
 {
 #if DEBUG
 	DBG(msg, res);
 #endif
-	if (res != 0) exit(1);
+	if (res != 0) return 1;
+	else return 0;
 }
 
 int generate_hash_extend(char* extendValue)
@@ -48,10 +51,7 @@ int generate_hash_extend(char* extendValue)
 
 	// SHA1 Value
 	SHA_CTX sha1;
-	char sha1_result[4][SHA_DIGEST_LENGTH];
-
-	// SecurePi Serial Number Value
-	char serial[16 + 1];
+	char sha1_result[SHA_DIGEST_LENGTH];
 
 	result = Tspi_Context_Create(&hContext);
 	TPM_ERROR_PRINT(result, "Create TPM Context\n");
@@ -62,83 +62,23 @@ int generate_hash_extend(char* extendValue)
 	result = Tspi_Context_GetTpmObject(hContext, &hTpm);
 	TPM_ERROR_PRINT(result, "Get TPM Handle\n");
 
-	// Hash u-boot.bin
-	for (i = 0; i < 4; i++)
-		memset(sha1_result[i], 0, sizeof(sha1_result[i]));
+	memset(sha1_result, 0, sizeof(sha1_result));
 	memset(buf, 0, sizeof(buf));
-	memset(serial, 0, sizeof(serial));
 
-	if (!(fp = fopen("/boot/u-boot.bin", "rb")))
+	if (!(fp = fopen("/sys/kernel/security/ima/ascii_runtime_measurements", "rb")))
 	{
-		printf("/boot/u-boot.bin Open Fail\n");
+		printf("/sys/kernel/security/ima/ascii_runtime_measurements Open Fail\n");
 		return 1;
 	}
 
-	SHA1_Init(&ctx);
+	SHA1_Init(&sha1);
 	while ((i = fread(buf, 1, sizeof(buf), fp)) > 0)
-		SHA1_Update(&ctx, buf, i);
-	SHA1_Final(sha1_result[0], &ctx);
+		SHA1_Update(&sha1, buf, i);
+	SHA1_Final(sha1_result, &sha1);
 	fclose(fp);
 
-	result = Tspi_TPM_PcrExtend(hTpm, 16, 20, (BYTE *)sha1_result[0], NULL, &PCR_length, &f_data);
+	result = Tspi_TPM_PcrExtend(hTpm, 16, 20, (BYTE *)sha1_result, NULL, &PCR_length, &f_data);
 	TPM_ERROR_PRINT(result, "TPM PCR and Bootloader Hash Extend\n");
-
-	// Hash image.fit
-	memset(buf, 0, sizeof(buf));
-
-	if (!(fp = fopen("/boot/image.fit", "rb")))
-	{
-		printf("/boot/image.fit Open Fail\n");
-		return 1;
-	}
-
-	SHA1_Init(&ctx);
-	while ((i = fread(buf, 1, sizeof(buf), fp)) > 0)
-		SHA1_Update(&ctx, buf, i);
-	SHA1_Final(sha1_result[1], &ctx);
-
-	fclose(fp);
-
-	result = Tspi_TPM_PcrExtend(hTpm, 16, 20, (BYTE *)sha1_result[1], NULL, &PCR_length, &f_data);
-	TPM_ERROR_PRINT(result, "TPM PCR and Kernel Hash Extend\n");
-
-	// Hash Secure_boot_daemon
-	if (!(fp = fopen("/Boot/Secure_boot_daemon", "rb"))) {
-		printf("/Boot/Secure_boot_daemon Open Fail\n");
-		return 1;
-	}
-
-	SHA1_Init(&ctx);
-	while ((i = fread(buf, 1, sizeof(buf), fp)) > 0) {
-		SHA1_Update(&ctx, buf, i);
-	}
-	SHA1_Final(sha1_result[2], &ctx);
-	fclose(fp);
-
-	result = Tspi_TPM_PcrExtend(hTpm, 16, 20, (BYTE *)sha1_result[2], NULL, &PCR_length, &f_data);
-	TPM_ERROR_PRINT(result, "TPM PCR and Secure_boot_daemon Hash Extend\n");
-
-	// Hash SecurePi Serial Number
-	memset(buf, 0, sizeof(buf));
-
-	if (!(fp = fopen("/proc/cpuinfo", "r")))
-	{
-		printf("/proc/cpuinfo Open Fail\n");
-		return 1;
-	}
-
-	SHA1_Init(&ctx);
-
-	while (fgets(buf, 256, fp))
-		if (strncmp(buf, "Serial", 6) == 0)
-			strcpy(serial, strchr(buf, ':') + 2);
-
-	SHA1_Update(&ctx, serial, sizeof(serial));
-	SHA1_Final(sha1_result[3], &ctx);
-	fclose(fp);
-
-	result = Tspi_TPM_PcrExtend(hTpm, 16, 20, (BYTE *)sha1_result[3], NULL, &PCR_length, &f_data);
-	TPM_ERROR_PRINT(result, "TPM PCR and Serial Hash Extend\n");
 
 	memcpy(extendValue, f_data, 20);
 
@@ -169,7 +109,9 @@ int createAIK()
 	unsigned char *blob_asn1 = NULL;
 	int asn1_len;
 	ASN1_OCTET_STRING *blob_str = NULL;
+	char authdata[20];
 
+	memset(authdata, 0, TPM_WELL_KNOWN_KEY_LEN);
 	result = Tspi_Context_Create(&hContext);
 	TPM_ERROR_PRINT(result, "Create TPM Context\n");
 
@@ -182,7 +124,7 @@ int createAIK()
 	result = Tspi_GetPolicyObject(hSRK, TSS_POLICY_USAGE, &hSRKPolicy);
 	TPM_ERROR_PRINT(result, "Get SRK Policy\n");
 
-	result = Tspi_Policy_SetSecret(hSRKPolicy, TSS_SECRET_MODE_PLAIN, 1, "1");
+	result = Tspi_Policy_SetSecret(hSRKPolicy, TSS_SECRET_MODE_SHA1, TPM_WELL_KNOWN_KEY_LEN, (BYTE*)authdata);
 	TPM_ERROR_PRINT(result, "Set SRK Secret\n");
 
 	result = Tspi_Context_GetTpmObject(hContext, &hTPM);
@@ -194,7 +136,7 @@ int createAIK()
 	result = Tspi_Policy_AssignToObject(hTPMPolicy, hTPM);
 	TPM_ERROR_PRINT(result, "Assign TPM Object\n");
 
-	result = Tspi_Policy_SetSecret(hTPMPolicy, TSS_SECRET_MODE_PLAIN, 1, "1");
+	result = Tspi_Policy_SetSecret(hTPMPolicy, TSS_SECRET_MODE_SHA1, TPM_WELL_KNOWN_KEY_LEN, (BYTE*)authdata);
 	TPM_ERROR_PRINT(result, "Set SRK Secret\n");
 
 	result = Tspi_Context_CreateObject(hContext, TSS_OBJECT_TYPE_RSAKEY, TSS_KEY_TYPE_LEGACY | TSS_KEY_SIZE_2048, hPCA);
@@ -219,7 +161,7 @@ int createAIK()
 	PEM_write_bio(outb, "TSS KEY BLOB", "", blob_asn1, asn1_len);
 	BIO_free(outb);
 
-	result = Tspi_GetAttribData(hAIK, TSS_TSPATTRIB_KEY_BLOB, TSS_TSPATTRIB_KEYBLOB_PUBLIC_KEY, *blobLen, &blob);
+	result = Tspi_GetAttribData(hAIK, TSS_TSPATTRIB_KEY_BLOB, TSS_TSPATTRIB_KEYBLOB_PUBLIC_KEY, &blobLen, &blob);
 	TPM_ERROR_PRINT(result, "Get AIK Public Key\n");
 
 	result = Tspi_EncodeDER_TssBlob(blobLen, blob, TSS_BLOB_TYPE_PUBKEY, &derBlobLen, derBlob);
@@ -254,7 +196,9 @@ EVP_PKEY *load()
 	EVP_PKEY *key;
 	EVP_PKEY *pubkey;
 	FILE *fp;
+	char authdata[20];
 
+	memset(authdata, 0, TPM_WELL_KNOWN_KEY_LEN);
 	ENGINE_load_builtin_engines();
 
 	e = ENGINE_by_id(engineId);
@@ -282,7 +226,7 @@ EVP_PKEY *load()
 		return NULL;
 	}
 
-	ENGINE_ctrl_cmd(e, "PIN", 0, "1", NULL, 0);
+	ENGINE_ctrl_cmd(e, "PIN", 0, (BYTE*)authdata, NULL, 0);
 	ENGINE_free(e);
 
 	if ((key = ENGINE_load_private_key(e, "AIK", NULL, NULL)) == NULL)
@@ -310,12 +254,13 @@ EVP_PKEY *load()
 int sendData(BIO* sbio, unsigned char* sign)
 {
 	FILE* fp = NULL;
-	int sendlen;
+	int sendLen;
 	char *sendBuf = NULL;
-	int pubkeylen, signlen;
+	int pubkeylen, signLen;
 	char *pubkeybuf = NULL;
 	int len;
-	char pubkeylenbuf[10] = "", signlenbuf[10] = "";
+	char pubkeylenbuf[10] = "", signlenBuf[10] = "";
+	char *buf = NULL;
 
 	// Read AIK Public Key
 	if (!(fp = fopen("AIK_public", "rb")))
@@ -366,6 +311,8 @@ int receiveData(BIO* sbio, char* recvData)
 
 int generate_signature(char* extendValue, unsigned char* sign)
 {
+	int result;
+
 	RSA *rsa = EVP_PKEY_get1_RSA(load());
 	if (rsa == NULL)
 	{
